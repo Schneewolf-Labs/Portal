@@ -20,6 +20,7 @@ class Server {
 
 		this._wss.on('connection', (ws) => {
 			// Server got a new connection
+			console.log('Got new connection');
 			ws.on('message', (msg) => {
 				this._handleMessage(ws, msg);
 			});
@@ -46,11 +47,12 @@ class Server {
 
 	_handleMessage(ws, msg) {
 		try {
+			console.log('Got message: ' + msg);
 			const data = JSON.parse(msg);
 			const portal = this._portalByWS.get(ws);
 			const client = this._clientsByWS.get(ws);
 			if (portal) { // if this ws is a portal, we are getting data back that needs to be relayed to a client
-				portal.relay(ws, data);
+				portal.relay(data);
 				return;
 			} else if (client) { // if this ws is a client, we are getting data from the client that needs to be relayed to a portal
 				if (client.portal) {

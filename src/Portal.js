@@ -25,15 +25,10 @@ class Portal {
 	}
 
 	// allows the portal to send data to a specific client
-	relay(ws, data) {
+	relay(data) {
 		const clientID = data._clientID;
 		const client = this._getClientByID(clientID);
 		if (client) {
-			// confirm the client's ws is the same as the one that sent the data
-			if (client.ws !== ws) {
-				console.error('Client ws does not match ws that sent data');
-				return;
-			}
 			// strip the _clientID from the data before sending it to the client
 			data._clientID = undefined;
 			client.ws.send(JSON.stringify(data));

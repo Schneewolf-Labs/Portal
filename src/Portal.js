@@ -15,6 +15,11 @@ class Portal {
 			this.clients.splice(index, 1);
 		}
 		client.portal = null;
+		// Signal portal that client was removed/disconnected
+		this.ws.send(JSON.stringify({
+			_clientID: client.id,
+			event: 'portal:client:disconnect'
+		}));
 	}
 
 	// allows clients to send data to the portal

@@ -28,9 +28,36 @@ class Server {
 				console.error('WS error: ' + err);
 			});
 			ws.on('close', () => {
-				// TODO: Handle portal and client disconnects
 				// Check if this ws is a portal
+				const isPortal = this._portalByWS.has(ws);
 				// Check if this ws is a client
+				const isClient = this._clientsByWS.has(ws);
+				
+				if (isPortal) {
+					// Remove portal from portals list
+					const portal = this._portalByWS.get(ws);
+					const index = this._portals.indexOf(portal);
+					this._portals.splice(index, 1);
+					// Remove portal from portalByWS map
+					this._portalByWS.delete(ws);
+					// Remove portal's clients
+					portal.clients.forEach((client) => {
+						this._clientsByWS.delete(client.ws);
+						client.ws.close();
+					});
+					console.log('Portal disconnected');
+				} else if (isClient) {
+					// Remove client from clientsByWS map
+					const client = this._clientsByWS.get(ws);
+					this._clientsByWS.delete(ws);
+					// Remove client from portal
+					if (client.portal) {
+						client.portal.removeClient(client);
+					}
+					console.log('Client disconnected')
+				} else {
+					console.warn('Unknown websocket disconnected');
+				}
 			});
 		});
 	}

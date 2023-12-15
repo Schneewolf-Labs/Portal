@@ -109,8 +109,13 @@ class Server {
 						if (key === this._joinKey) {
 							console.log('Joining portal');
 							const client = new Client(ws);
-							this._assignClientToPortal(client);
-							this._clientsByWS.set(ws, client);
+							const portal = this._assignClientToPortal(client);
+							if (portal) {
+								this._clientsByWS.set(ws, client);
+							} else {
+								console.error('No portals available to join');
+								ws.close();
+							}
 						} else {
 							console.error('Invalid join key');
 						}
@@ -125,7 +130,10 @@ class Server {
 
 	_assignClientToPortal(client) {
 		const portal = this._getLeastPopulatedPortal();
-		portal.addClient(client);
+		if (portal) {
+			portal.addClient(client);
+		}
+		return portal;
 	}
 
 	_getLeastPopulatedPortal() {

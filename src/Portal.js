@@ -2,6 +2,12 @@ class Portal {
 	constructor(ws) {
 		this.ws = ws;
 		this.clients = [];
+		// ping the portal ws every 30 seconds to keep it alive
+		this._pingInterval = setInterval(() => {
+			this.ws.send(JSON.stringify({
+				event: 'portal:heartbeat'
+			}));
+		}, 30000);
 	}
 
 	addClient(client) {

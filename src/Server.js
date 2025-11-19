@@ -3,6 +3,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const Client = require('./Client');
 const Portal = require('./Portal');
+const logger = require('./Logger');
 
 class Server {
 	constructor(port, registerKey, joinKey) {
@@ -18,14 +19,17 @@ class Server {
 		this._server = http.createServer(this._app);
 		this._wss = new WebSocket.Server({ server: this._server });
 
+		// Setup HTTP endpoints
+		this._setupRoutes();
+
 		this._wss.on('connection', (ws) => {
 			// Server got a new connection
-			console.log('Got new connection');
+			logger.info('Got new connection');
 			ws.on('message', (msg) => {
 				this._handleMessage(ws, msg);
 			});
 			ws.on('error', (err) => {
-				console.error('WS error: ' + err);
+				logger.error('WS error: ' + err);
 			});
 			ws.on('close', () => {
 				// Check if this ws is a portal
@@ -45,7 +49,9 @@ class Server {
 						this._clientsByWS.delete(client.ws);
 						client.ws.close();
 					});
-					console.log('Portal disconnected');
+					// Clean up portal resources
+					portal.destroy();
+					logger.info('Portal disconnected');
 				} else if (isClient) {
 					// Remove client from clientsByWS map
 					const client = this._clientsByWS.get(ws);
@@ -54,17 +60,44 @@ class Server {
 					if (client.portal) {
 						client.portal.removeClient(client);
 					}
-					console.log('Client disconnected')
+					logger.info('Client disconnected')
 				} else {
-					console.warn('Unknown websocket disconnected');
+					logger.warn('Unknown websocket disconnected');
 				}
+			});
+		});
+	}
+
+	_setupRoutes() {
+		// Health check endpoint
+		this._app.get('/health', (req, res) => {
+			res.status(200).json({
+				status: 'healthy',
+				uptime: process.uptime(),
+				timestamp: new Date().toISOString()
+			});
+		});
+
+		// Status endpoint with metrics
+		this._app.get('/status', (req, res) => {
+			const totalClients = Array.from(this._clientsByWS.values()).length;
+			const portalStats = this._portals.map(portal => ({
+				clientCount: portal.clients.length
+			}));
+
+			res.status(200).json({
+				portals: this._portals.length,
+				clients: totalClients,
+				portalStats: portalStats,
+				uptime: process.uptime(),
+				timestamp: new Date().toISOString()
 			});
 		});
 	}
 
 	start() {
 		this._server.listen(this._port, () => {
-			console.log('Portal Server listening on %d', this._server.address().port);
+			logger.info('Portal Server listening on %d', this._server.address().port);
 		});
 	}
 
@@ -74,8 +107,15 @@ class Server {
 
 	_handleMessage(ws, msg) {
 		try {
-			console.log('Got message: ' + msg);
+			logger.debug('Got message: ' + msg);
 			const data = JSON.parse(msg);
+
+			// Validate message is an object
+			if (!data || typeof data !== 'object') {
+				logger.error('Invalid message format: not an object');
+				return;
+			}
+
 			const portal = this._portalByWS.get(ws);
 			const client = this._clientsByWS.get(ws);
 			if (portal) { // if this ws is a portal, we are getting data back that needs to be relayed to a client
@@ -85,46 +125,76 @@ class Server {
 				if (client.portal) {
 					client.portal.send(client, data);
 				} else {
-					console.error('Client not assigned to portal');
+					logger.error('Client not assigned to portal');
 				}
 				return;
 			} else { // in this final state, check if the ws is trying to register as a portal or join as a client
 				const event = data.event;
 				const key = data.key;
+
+				// Validate event and key are present
+				if (!event || typeof event !== 'string') {
+					logger.error('Invalid or missing event field');
+					ws.close();
+					return;
+				}
+
+				if (!key || typeof key !== 'string') {
+					logger.error('Invalid or missing key field');
+					ws.close();
+					return;
+				}
+
 				switch (event) {
 					case 'portal:register':
-						console.log('Got Portal registration request');
+						logger.info('Got Portal registration request');
 						if (key === this._registerKey) {
-							console.log('Registering new portal');
+							logger.info('Registering new portal');
 							const portal = new Portal(ws);
 							this._portals.push(portal);
 							this._portalByWS.set(ws, portal);
+							// Send acknowledgment
+							this._safeSend(ws, {
+								event: 'portal:registered',
+								success: true
+							});
 						} else {
-							console.error('Invalid registration key');
+							logger.error('Invalid registration key');
 							ws.close();
 						}
 						break;
 					case 'portal:join':
-						console.log('Got Portal join request');
+						logger.info('Got Portal join request');
 						if (key === this._joinKey) {
-							console.log('Joining portal');
+							logger.info('Joining portal');
 							const client = new Client(ws);
 							const portal = this._assignClientToPortal(client);
 							if (portal) {
 								this._clientsByWS.set(ws, client);
+								// Send acknowledgment with client ID
+								this._safeSend(ws, {
+									event: 'portal:joined',
+									success: true,
+									clientID: client.id
+								});
 							} else {
-								console.error('No portals available to join');
+								logger.error('No portals available to join');
 								ws.close();
 							}
 						} else {
-							console.error('Invalid join key');
+							logger.error('Invalid join key');
+							ws.close();
 						}
+						break;
+					default:
+						logger.error('Unknown event: ' + event);
+						ws.close();
 						break;
 				}
 				return;
 			}
 		} catch (e) {
-			console.error('Error parsing message: ' + e);
+			logger.error('Error parsing message: ' + e);
 		}
 	}
 
@@ -147,6 +217,19 @@ class Server {
 			}
 		}
 		return leastPopulatedPortal;
+	}
+
+	// Safe wrapper for WebSocket send with error handling
+	_safeSend(ws, data) {
+		try {
+			if (ws.readyState === 1) { // 1 = WebSocket.OPEN
+				ws.send(JSON.stringify(data));
+			} else {
+				logger.error('WebSocket is not open. ReadyState: ' + ws.readyState);
+			}
+		} catch (error) {
+			logger.error('Error sending WebSocket message: ' + error.message);
+		}
 	}
 
 }

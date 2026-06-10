@@ -1,14 +1,10 @@
-const uuid = require('uuid');
+const crypto = require('crypto');
 
 class Client {
 	constructor(ws) {
 		this.ws = ws;
-		this.id = this._generateClientID();
+		this.id = crypto.randomUUID();
 		this.portal = null;
-	}
-
-	_generateClientID() {
-		return uuid.v4();
 	}
 }
 

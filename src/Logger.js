@@ -7,8 +7,9 @@ class Logger {
 			ERROR: 3
 		};
 		// Set default log level from environment or INFO
-		const envLevel = process.env.LOG_LEVEL || 'INFO';
-		this.currentLevel = this.levels[envLevel] || this.levels.INFO;
+		// (?? not ||: DEBUG maps to 0, which is falsy)
+		const envLevel = (process.env.LOG_LEVEL || 'INFO').toUpperCase();
+		this.currentLevel = this.levels[envLevel] ?? this.levels.INFO;
 	}
 
 	_log(level, message, ...args) {

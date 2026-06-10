@@ -1,24 +1,13 @@
+const WebSocket = require('ws');
 const logger = require('./Logger');
 
+// A registered portal endpoint and the set of clients assigned to it.
+// Liveness pings are handled centrally by the Server heartbeat sweep.
 class Portal {
 	constructor(ws) {
 		this.ws = ws;
 		this.clients = [];
-		this._clientsById = new Map(); // Map for O(1) client lookup by ID
-		// ping the portal ws every 30 seconds to keep it alive
-		this._pingInterval = setInterval(() => {
-			this._safeSend(this.ws, {
-				event: 'portal:heartbeat'
-			});
-		}, 30000);
-	}
-
-	// Clean up resources when portal is destroyed
-	destroy() {
-		if (this._pingInterval) {
-			clearInterval(this._pingInterval);
-			this._pingInterval = null;
-		}
+		this._clientsById = new Map();
 	}
 
 	addClient(client) {
@@ -34,54 +23,46 @@ class Portal {
 		}
 		this._clientsById.delete(client.id);
 		client.portal = null;
-		// Signal portal that client was removed/disconnected
-		this._safeSend(this.ws, {
-			_clientID: client.id,
-			event: 'portal:client:disconnect'
+		this.sendControl({
+			event: 'portal:client:disconnect',
+			_clientID: client.id
 		});
 	}
 
-	// allows clients to send data to the portal
+	// Forward a client's message to this portal, tagged with the sender's ID
 	send(client, data) {
-		const clientID = client.id;
-		data._clientID = clientID;
+		data._clientID = client.id;
 		this._safeSend(this.ws, data);
 	}
 
-	// allows the portal to send data to a specific client
+	// Send a server control message to this portal
+	sendControl(data) {
+		this._safeSend(this.ws, data);
+	}
+
+	// Deliver a portal's message to the client addressed by _clientID
 	relay(data) {
 		const clientID = data._clientID;
-
-		// Validate clientID is present
 		if (!clientID || typeof clientID !== 'string') {
-			logger.error('Invalid or missing _clientID in relay message');
+			logger.warn('Dropping portal message: invalid or missing _clientID');
 			return;
 		}
-
-		const client = this._getClientByID(clientID);
-		if (client) {
-			// strip the _clientID from the data before sending it to the client
-			delete data._clientID;
-			this._safeSend(client.ws, data);
-		} else {
-			logger.error('Client not found: ' + clientID);
+		const client = this._clientsById.get(clientID);
+		if (!client) {
+			logger.warn('Dropping portal message: client not found: %s', clientID);
+			return;
 		}
+		delete data._clientID;
+		this._safeSend(client.ws, data);
 	}
 
-	_getClientByID(clientID) {
-		return this._clientsById.get(clientID) || null;
-	}
-
-	// Safe wrapper for WebSocket send with error handling
 	_safeSend(ws, data) {
 		try {
-			if (ws.readyState === 1) { // 1 = WebSocket.OPEN
+			if (ws.readyState === WebSocket.OPEN) {
 				ws.send(JSON.stringify(data));
-			} else {
-				logger.error('WebSocket is not open. ReadyState: ' + ws.readyState);
 			}
 		} catch (error) {
-			logger.error('Error sending WebSocket message: ' + error.message);
+			logger.error('Error sending WebSocket message: %s', error.message);
 		}
 	}
 }

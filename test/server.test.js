@@ -1,236 +1,305 @@
 const { expect } = require('chai');
+const http = require('http');
 const WebSocket = require('ws');
 const Server = require('../src/Server');
+const { loadConfig } = require('../src/Config');
+
+const port = 3099;
+const registerKey = 'test-register-key-0123456789';
+const joinKey = 'test-join-key-0123456789';
+
+function makeConfig(overrides = {}) {
+	const config = loadConfig({
+		PORTAL_LISTEN_PORT: String(port),
+		PORTAL_REGISTER_KEY: registerKey,
+		PORTAL_JOIN_KEY: joinKey
+	});
+	return { ...config, ...overrides };
+}
+
+function getJSON(path) {
+	return new Promise((resolve, reject) => {
+		http.get({ hostname: 'localhost', port, path }, (res) => {
+			let data = '';
+			res.on('data', (chunk) => { data += chunk; });
+			res.on('end', () => resolve({ statusCode: res.statusCode, body: JSON.parse(data) }));
+		}).on('error', reject);
+	});
+}
+
+function connect() {
+	return new Promise((resolve, reject) => {
+		const ws = new WebSocket(`ws://localhost:${port}`);
+		ws.on('open', () => resolve(ws));
+		ws.on('error', reject);
+	});
+}
+
+function nextMessage(ws) {
+	return new Promise((resolve) => {
+		ws.once('message', (data) => resolve(JSON.parse(data)));
+	});
+}
+
+function closed(ws) {
+	return new Promise((resolve) => {
+		ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+	});
+}
+
+async function registerPortal(ws) {
+	ws.send(JSON.stringify({ event: 'portal:register', key: registerKey }));
+	return nextMessage(ws);
+}
+
+async function joinClient(ws) {
+	ws.send(JSON.stringify({ event: 'portal:join', key: joinKey }));
+	return nextMessage(ws);
+}
+
+describe('Config', function() {
+	it('should reject missing keys', function() {
+		expect(() => loadConfig({})).to.throw(/PORTAL_REGISTER_KEY/);
+	});
+
+	it('should reject short keys', function() {
+		expect(() => loadConfig({
+			PORTAL_REGISTER_KEY: 'short',
+			PORTAL_JOIN_KEY: 'also-short'
+		})).to.throw(/at least 16 characters/);
+	});
+
+	it('should reject well-known placeholder keys', function() {
+		expect(() => loadConfig({
+			PORTAL_REGISTER_KEY: '1234567890123456',
+			PORTAL_JOIN_KEY: 'your-secure-join-key'
+		})).to.throw(/placeholder/);
+	});
+
+	it('should reject identical register and join keys', function() {
+		expect(() => loadConfig({
+			PORTAL_REGISTER_KEY: 'same-key-0123456789',
+			PORTAL_JOIN_KEY: 'same-key-0123456789'
+		})).to.throw(/must be different/);
+	});
+
+	it('should accept valid configuration with defaults', function() {
+		const config = makeConfig();
+		expect(config.port).to.equal(port);
+		expect(config.maxPayloadBytes).to.be.greaterThan(0);
+		expect(config.authTimeoutMs).to.be.greaterThan(0);
+	});
+});
 
 describe('Portal Server', function() {
 	let server;
-	const port = 3099;
-	const registerKey = 'test-register-key';
-	const joinKey = 'test-join-key';
+	const sockets = [];
 
-	beforeEach(function(done) {
-		server = new Server(port, registerKey, joinKey);
-		server.start();
-		// Give server time to start
-		setTimeout(done, 100);
-	});
+	function track(ws) {
+		sockets.push(ws);
+		return ws;
+	}
+
+	function startServer(config) {
+		return new Promise((resolve) => {
+			server = new Server(config);
+			server.start(resolve);
+		});
+	}
 
 	afterEach(function(done) {
-		server.stop();
-		// Give server time to stop
-		setTimeout(done, 100);
-	});
-
-	describe('Health Endpoints', function() {
-		it('should respond to /health endpoint', function(done) {
-			const http = require('http');
-			const options = {
-				hostname: 'localhost',
-				port: port,
-				path: '/health',
-				method: 'GET'
-			};
-
-			const req = http.request(options, (res) => {
-				let data = '';
-				res.on('data', (chunk) => {
-					data += chunk;
-				});
-				res.on('end', () => {
-					const response = JSON.parse(data);
-					expect(response.status).to.equal('healthy');
-					expect(response).to.have.property('uptime');
-					expect(response).to.have.property('timestamp');
-					done();
-				});
-			});
-
-			req.on('error', done);
-			req.end();
-		});
-
-		it('should respond to /status endpoint', function(done) {
-			const http = require('http');
-			const options = {
-				hostname: 'localhost',
-				port: port,
-				path: '/status',
-				method: 'GET'
-			};
-
-			const req = http.request(options, (res) => {
-				let data = '';
-				res.on('data', (chunk) => {
-					data += chunk;
-				});
-				res.on('end', () => {
-					const response = JSON.parse(data);
-					expect(response).to.have.property('portals');
-					expect(response).to.have.property('clients');
-					expect(response).to.have.property('portalStats');
-					expect(response).to.have.property('uptime');
-					done();
-				});
-			});
-
-			req.on('error', done);
-			req.end();
-		});
-	});
-
-	describe('Portal Registration', function() {
-		it('should accept valid portal registration', function(done) {
-			const ws = new WebSocket(`ws://localhost:${port}`);
-
-			ws.on('open', () => {
-				ws.send(JSON.stringify({
-					event: 'portal:register',
-					key: registerKey
-				}));
-			});
-
-			ws.on('message', (data) => {
-				const message = JSON.parse(data);
-				if (message.event === 'portal:registered') {
-					expect(message.success).to.be.true;
-					ws.close();
-					done();
-				}
-			});
-
-			ws.on('error', done);
-		});
-
-		it('should reject invalid portal registration key', function(done) {
-			const ws = new WebSocket(`ws://localhost:${port}`);
-
-			ws.on('open', () => {
-				ws.send(JSON.stringify({
-					event: 'portal:register',
-					key: 'invalid-key'
-				}));
-			});
-
-			ws.on('close', () => {
-				done();
-			});
-
-			ws.on('error', done);
-		});
-	});
-
-	describe('Client Join', function() {
-		let portalWs;
-
-		beforeEach(function(done) {
-			// Register a portal first
-			portalWs = new WebSocket(`ws://localhost:${port}`);
-			portalWs.on('open', () => {
-				portalWs.send(JSON.stringify({
-					event: 'portal:register',
-					key: registerKey
-				}));
-			});
-			portalWs.on('message', (data) => {
-				const message = JSON.parse(data);
-				if (message.event === 'portal:registered') {
-					done();
-				}
-			});
-		});
-
-		afterEach(function() {
-			if (portalWs) {
-				portalWs.close();
+		for (const ws of sockets.splice(0)) {
+			if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+				ws.terminate();
 			}
+		}
+		server.stop(done);
+	});
+
+	describe('HTTP endpoints', function() {
+		beforeEach(function() {
+			return startServer(makeConfig());
 		});
 
-		it('should accept valid client join', function(done) {
-			const clientWs = new WebSocket(`ws://localhost:${port}`);
-
-			clientWs.on('open', () => {
-				clientWs.send(JSON.stringify({
-					event: 'portal:join',
-					key: joinKey
-				}));
-			});
-
-			clientWs.on('message', (data) => {
-				const message = JSON.parse(data);
-				if (message.event === 'portal:joined') {
-					expect(message.success).to.be.true;
-					expect(message).to.have.property('clientID');
-					clientWs.close();
-					done();
-				}
-			});
-
-			clientWs.on('error', done);
+		it('should respond to /health', async function() {
+			const { statusCode, body } = await getJSON('/health');
+			expect(statusCode).to.equal(200);
+			expect(body.status).to.equal('healthy');
+			expect(body).to.have.property('uptime');
+			expect(body).to.have.property('timestamp');
 		});
 
-		it('should reject invalid client join key', function(done) {
-			const clientWs = new WebSocket(`ws://localhost:${port}`);
+		it('should respond to /status with metrics', async function() {
+			const portalWs = track(await connect());
+			await registerPortal(portalWs);
+			const clientWs = track(await connect());
+			await joinClient(clientWs);
 
-			clientWs.on('open', () => {
-				clientWs.send(JSON.stringify({
-					event: 'portal:join',
-					key: 'invalid-key'
-				}));
-			});
+			const { statusCode, body } = await getJSON('/status');
+			expect(statusCode).to.equal(200);
+			expect(body.portals).to.equal(1);
+			expect(body.clients).to.equal(1);
+			expect(body.portalStats).to.deep.equal([{ clientCount: 1 }]);
+		});
 
-			clientWs.on('close', () => {
-				done();
-			});
-
-			clientWs.on('error', done);
+		it('should return 404 for unknown paths', async function() {
+			const { statusCode } = await getJSON('/nope');
+			expect(statusCode).to.equal(404);
 		});
 	});
 
-	describe('Message Validation', function() {
-		it('should reject invalid JSON', function(done) {
-			const ws = new WebSocket(`ws://localhost:${port}`);
-
-			ws.on('open', () => {
-				ws.send('invalid json');
-				// If server doesn't crash, test passes
-				setTimeout(() => {
-					ws.close();
-					done();
-				}, 100);
-			});
-
-			ws.on('error', done);
+	describe('Portal registration', function() {
+		beforeEach(function() {
+			return startServer(makeConfig());
 		});
 
-		it('should reject non-object messages', function(done) {
-			const ws = new WebSocket(`ws://localhost:${port}`);
-
-			ws.on('open', () => {
-				ws.send(JSON.stringify("string message"));
-				// If server doesn't crash, test passes
-				setTimeout(() => {
-					ws.close();
-					done();
-				}, 100);
-			});
-
-			ws.on('error', done);
+		it('should accept a valid registration key', async function() {
+			const ws = track(await connect());
+			const reply = await registerPortal(ws);
+			expect(reply.event).to.equal('portal:registered');
+			expect(reply.success).to.be.true;
 		});
 
-		it('should reject messages without event field', function(done) {
-			const ws = new WebSocket(`ws://localhost:${port}`);
+		it('should close with policy violation on an invalid key', async function() {
+			const ws = track(await connect());
+			ws.send(JSON.stringify({ event: 'portal:register', key: 'wrong-key-0123456789' }));
+			const { code, reason } = await closed(ws);
+			expect(code).to.equal(1008);
+			expect(reason).to.equal('invalid key');
+		});
+	});
 
-			ws.on('open', () => {
-				ws.send(JSON.stringify({
-					key: registerKey
-				}));
-			});
+	describe('Client join', function() {
+		beforeEach(async function() {
+			await startServer(makeConfig());
+		});
 
-			ws.on('close', () => {
-				done();
-			});
+		it('should accept a valid join key when a portal exists', async function() {
+			const portalWs = track(await connect());
+			await registerPortal(portalWs);
+			const clientWs = track(await connect());
+			const reply = await joinClient(clientWs);
+			expect(reply.event).to.equal('portal:joined');
+			expect(reply.success).to.be.true;
+			expect(reply.clientID).to.be.a('string');
+		});
 
-			ws.on('error', done);
+		it('should reject an invalid join key', async function() {
+			const ws = track(await connect());
+			ws.send(JSON.stringify({ event: 'portal:join', key: 'wrong-key-0123456789' }));
+			const { code } = await closed(ws);
+			expect(code).to.equal(1008);
+		});
+
+		it('should reject joins when no portals are available', async function() {
+			const ws = track(await connect());
+			ws.send(JSON.stringify({ event: 'portal:join', key: joinKey }));
+			const { code, reason } = await closed(ws);
+			expect(code).to.equal(1013);
+			expect(reason).to.equal('no portals available');
+		});
+	});
+
+	describe('Message relay', function() {
+		let portalWs;
+		let clientWs;
+		let clientID;
+
+		beforeEach(async function() {
+			await startServer(makeConfig());
+			portalWs = track(await connect());
+			await registerPortal(portalWs);
+			clientWs = track(await connect());
+			({ clientID } = await joinClient(clientWs));
+		});
+
+		it('should relay client messages to the portal tagged with _clientID', async function() {
+			clientWs.send(JSON.stringify({ event: 'chat', text: 'hello' }));
+			const msg = await nextMessage(portalWs);
+			expect(msg.event).to.equal('chat');
+			expect(msg.text).to.equal('hello');
+			expect(msg._clientID).to.equal(clientID);
+		});
+
+		it('should relay portal messages to the addressed client without _clientID', async function() {
+			portalWs.send(JSON.stringify({ _clientID: clientID, event: 'reply', text: 'hi back' }));
+			const msg = await nextMessage(clientWs);
+			expect(msg.event).to.equal('reply');
+			expect(msg.text).to.equal('hi back');
+			expect(msg).to.not.have.property('_clientID');
+		});
+
+		it('should not relay client messages that use reserved portal:* events', async function() {
+			clientWs.send(JSON.stringify({ event: 'portal:client:disconnect' }));
+			clientWs.send(JSON.stringify({ event: 'legit' }));
+			// The spoofed message must be dropped, so the next portal message is 'legit'
+			const msg = await nextMessage(portalWs);
+			expect(msg.event).to.equal('legit');
+		});
+
+		it('should notify the portal when a client disconnects', async function() {
+			clientWs.close();
+			const msg = await nextMessage(portalWs);
+			expect(msg.event).to.equal('portal:client:disconnect');
+			expect(msg._clientID).to.equal(clientID);
+		});
+
+		it('should disconnect clients when their portal disconnects', async function() {
+			portalWs.close();
+			const { code, reason } = await closed(clientWs);
+			expect(code).to.equal(1012);
+			expect(reason).to.equal('portal disconnected');
+		});
+	});
+
+	describe('Hardening', function() {
+		it('should close unauthenticated connections after the auth timeout', async function() {
+			await startServer(makeConfig({ authTimeoutMs: 200 }));
+			const ws = track(await connect());
+			const { code, reason } = await closed(ws);
+			expect(code).to.equal(1008);
+			expect(reason).to.equal('authentication timeout');
+		});
+
+		it('should drop connections that exceed the max payload size', async function() {
+			await startServer(makeConfig({ maxPayloadBytes: 1024 }));
+			const ws = track(await connect());
+			await registerPortal(ws);
+			ws.send(JSON.stringify({ event: 'big', data: 'x'.repeat(4096) }));
+			const { code } = await closed(ws);
+			expect(code).to.equal(1009); // message too big
+		});
+
+		it('should throttle repeated failed auth attempts from the same IP', async function() {
+			await startServer(makeConfig({ maxAuthFailuresPerMinute: 2 }));
+			for (let i = 0; i < 2; i++) {
+				const ws = track(await connect());
+				ws.send(JSON.stringify({ event: 'portal:register', key: 'wrong-key-0123456789' }));
+				await closed(ws);
+			}
+			const ws = track(await connect());
+			const { code, reason } = await closed(ws);
+			expect(code).to.equal(1013);
+			expect(reason).to.match(/too many failed attempts/);
+		});
+
+		it('should survive invalid JSON and non-object messages', async function() {
+			await startServer(makeConfig());
+			const ws = track(await connect());
+			ws.send('not json');
+			ws.send(JSON.stringify('a string'));
+			ws.send(JSON.stringify([1, 2, 3]));
+			// Server must still be responsive afterwards
+			const { body } = await getJSON('/health');
+			expect(body.status).to.equal('healthy');
+		});
+
+		it('should close handshakes missing event or key', async function() {
+			await startServer(makeConfig());
+			const ws = track(await connect());
+			ws.send(JSON.stringify({ key: registerKey }));
+			const { code } = await closed(ws);
+			expect(code).to.equal(1008);
 		});
 	});
 });
